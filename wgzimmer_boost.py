@@ -39,29 +39,58 @@ class WGZimmerBooster:
         self.headless = headless
         self.browser = None
         self.context = None
+        self.playwright = None
         
     async def init_browser(self):
         """Initialize the browser instance"""
-        playwright = await async_playwright().start()
-        self.browser = await playwright.chromium.launch(
-            headless=self.headless,
-            args=['--disable-blink-features=AutomationControlled']
-        )
-        
-        # Create context with realistic settings
-        self.context = await self.browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            locale='de-CH',
-            timezone_id='Europe/Zurich'
-        )
+        try:
+            self.playwright = await async_playwright().start()
+            
+            # Browser launch arguments for better compatibility
+            launch_args = [
+                '--disable-blink-features=AutomationControlled',
+                '--no-sandbox',  # Needed for WSL and some Linux environments
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',  # Overcome limited resource problems
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--disable-gpu'  # Helps with WSL
+            ]
+            
+            logging.info("Launching browser...")
+            self.browser = await self.playwright.chromium.launch(
+                headless=self.headless,
+                args=launch_args,
+                timeout=60000  # Increased timeout to 60 seconds
+            )
+            
+            # Create context with realistic settings
+            self.context = await self.browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                locale='de-CH',
+                timezone_id='Europe/Zurich'
+            )
+            
+            logging.info("Browser initialized successfully")
+            
+        except Exception as e:
+            logging.error(f"Failed to initialize browser: {e}")
+            logging.error("Try running: playwright install chromium")
+            raise
         
     async def close_browser(self):
         """Close the browser instance"""
-        if self.context:
-            await self.context.close()
-        if self.browser:
-            await self.browser.close()
+        try:
+            if self.context:
+                await self.context.close()
+            if self.browser:
+                await self.browser.close()
+            if hasattr(self, 'playwright') and self.playwright:
+                await self.playwright.stop()
+        except Exception as e:
+            logging.error(f"Error closing browser: {e}")
     
     async def random_delay(self, min_seconds: float = 1.0, max_seconds: float = 3.0):
         """Add random human-like delay"""
@@ -298,7 +327,11 @@ async def run_continuous():
 
 async def run_once():
     """Run the booster once (for testing)"""
-    booster = WGZimmerBooster(headless=False)  # Visible for testing
+    # Check if we have a display, if not use headless
+    import os
+    has_display = os.environ.get('DISPLAY') is not None
+    
+    booster = WGZimmerBooster(headless=not has_display)  # Headless if no display
     
     try:
         await booster.init_browser()
@@ -311,11 +344,50 @@ async def run_once():
 
 if __name__ == "__main__":
     import sys
+    import os
     
-    # Check command line arguments
-    if len(sys.argv) > 1 and sys.argv[1] == "--once":
-        # Run once for testing
-        asyncio.run(run_once())
+    # Check for display availability
+    has_display = os.environ.get('DISPLAY') is not None
+    
+    # Parse command line arguments
+    if len(sys.argv) > 1:
+        if sys.argv[1] == "--once":
+            # Run once for testing
+            # Use headless if no display available
+            asyncio.run(run_once())
+        elif sys.argv[1] == "--once-visible":
+            # Force visible browser (will fail if no display)
+            async def run_visible():
+                booster = WGZimmerBooster(headless=False)
+                try:
+                    await booster.init_browser()
+                    logging.info("Running single boost cycle...")
+                    await booster.boost_all_ads()
+                    logging.info("Single boost cycle completed")
+                finally:
+                    await booster.close_browser()
+            
+            if not has_display:
+                print("❌ No display available. Use --once instead or install xvfb")
+                sys.exit(1)
+            asyncio.run(run_visible())
+        elif sys.argv[1] == "--help":
+            print("""
+WGZimmer Ad Booster - Usage:
+
+  python3 wgzimmer_boost.py              Run continuously (headless)
+  python3 wgzimmer_boost.py --once       Run once (auto-detect display)
+  python3 wgzimmer_boost.py --once-visible   Run once with visible browser
+  python3 wgzimmer_boost.py --help       Show this help
+
+For servers without display, use --once (default) or run normally.
+For local testing with display, use --once-visible.
+            """)
+            sys.exit(0)
+        else:
+            print(f"Unknown option: {sys.argv[1]}")
+            print("Use --help for usage information")
+            sys.exit(1)
     else:
-        # Run continuously
+        # Run continuously (always headless for production)
         asyncio.run(run_continuous())
